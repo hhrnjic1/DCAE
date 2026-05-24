@@ -9,7 +9,8 @@ import csv
 from PIL import Image
 
 import torch
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import autocast
+from torch.cuda.amp import GradScaler
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
@@ -169,36 +170,42 @@ def train_one_epoch(
 
         d = d.to(device)
         optimizer.zero_grad()
+        aux_optimizer.zero_grad()
 
+        # forward pass (runs in fp16 when --amp is on)
+        with autocast("cuda", enabled=args.amp):
+            out_net = model(d)
+            out_criterion = criterion(out_net, d)
+
+        # main backward with AMP scaler
+        scaler.scale(out_criterion["loss"]).backward()
+        if clip_max_norm > 0:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), clip_max_norm)
+        scaler.step(optimizer)
+        scaler.update()
+
+        # aux optimizer: kept in fp32 (entropy bottleneck quantile fitting)
+        aux_loss = model.module.aux_loss() if torch.cuda.device_count() > 1 else model.aux_loss()
+        aux_loss.backward()
+        aux_optimizer.step()
+
+        # mid-epoch checkpoint (saves to Drive on Colab so disconnect doesn't lose progress)
         if args.save and (i + 1) % args.save_interval == 0:
             save_checkpoint(
                 {
                     "epoch": epoch,
                     "iter": i,
-                    "state_dict": net.state_dict(),
+                    "state_dict": model.state_dict(),
                     "optimizer": optimizer.state_dict(),
                     "aux_optimizer": aux_optimizer.state_dict(),
                     "lr_scheduler": lr_scheduler.state_dict(),
                 },
                 False,
+                epoch,
                 args.save_path,
+                args.save_path + "checkpoint_interval.pth.tar",
             )
-        aux_optimizer.zero_grad()
-        out_net = model(d)
-        out_criterion = criterion(out_net, d)
-        out_criterion["loss"].backward()
-
-        if clip_max_norm > 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), clip_max_norm) 
-        scaler.unscale_(optimizer)
- 
-        scaler.step(optimizer)
- 
-        scaler.update()
-        
-        aux_loss = model.module.aux_loss() if torch.cuda.device_count() > 1 else model.aux_loss()
-        aux_scaler.scale(loss).backward()
-        aux_optimizer.step()
         
 
         if (i+1) % 100 == 0:
