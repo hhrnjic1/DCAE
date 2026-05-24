@@ -10,7 +10,7 @@ import urllib.request
 from pathlib import Path
 
 
-KODAK_BASE = "http://r0k.us/graphics/kodak/kodak/kodim{:02d}.png"
+KODAK_BASE = "https://r0k.us/graphics/kodak/kodak/kodim{:02d}.png"
 NUM_IMAGES = 24
 
 
