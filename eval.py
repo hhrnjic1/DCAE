@@ -1,3 +1,5 @@
+from pathlib import Path
+import json
 import torch
 import torch.nn.functional as F
 from torchvision import transforms
@@ -78,6 +80,14 @@ def parse_args(argv):
     parser.add_argument("--save_path", default=None, type=str, help="Path to save")
     parser.add_argument(
         "--real", action="store_true", default=True
+    )
+    parser.add_argument(
+        "--results_json", default=None,
+        help="If set, write aggregated metrics to this JSON file (for BD-Rate computation)"
+    )
+    parser.add_argument(
+        "--lmbda", type=float, default=None,
+        help="Lambda value to record in results_json (optional, for bookkeeping)"
     )
     parser.set_defaults(real=False)
     args = parser.parse_args(argv)
@@ -214,6 +224,22 @@ def main(argv):
     print(f'average_encode_time: {encode_time:.3f} ms')
     print(f'average_decode_time: {decode_time:.3f} ms')
     print(f'average_flops: {ave_flops:.3f}')
+
+
+    if args.results_json:
+        out = {
+            "lambda": args.lmbda,
+            "bpp": float(bpp_sum / num_images),
+            "psnr": float(psnr_sum / num_images),
+            "msssim": float(ms_ssim_sum / num_images),
+            "enc_ms": float(enc_time_sum / num_images * 1000),
+            "dec_ms": float(dec_time_sum / num_images * 1000),
+        }
+        Path(args.results_json).parent.mkdir(parents=True, exist_ok=True)
+        with open(args.results_json, "w") as _f:
+            json.dump(out, _f, indent=2)
+        print(f"Results saved to {args.results_json}")
+
 
 if __name__ == "__main__":
     print(torch.cuda.is_available())

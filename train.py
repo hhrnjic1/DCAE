@@ -9,6 +9,7 @@ import csv
 from PIL import Image
 
 import torch
+from torch.cuda.amp import GradScaler, autocast
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
@@ -162,10 +163,26 @@ def train_one_epoch(
 
     pre_time = 0
     now_time = time.time()
+
+    scaler = GradScaler(enabled=args.amp)
     for i, d in enumerate(train_dataloader):
 
         d = d.to(device)
         optimizer.zero_grad()
+
+        if args.save and (i + 1) % args.save_interval == 0:
+            save_checkpoint(
+                {
+                    "epoch": epoch,
+                    "iter": i,
+                    "state_dict": net.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "aux_optimizer": aux_optimizer.state_dict(),
+                    "lr_scheduler": lr_scheduler.state_dict(),
+                },
+                False,
+                args.save_path,
+            )
         aux_optimizer.zero_grad()
         out_net = model(d)
         out_criterion = criterion(out_net, d)
@@ -173,10 +190,14 @@ def train_one_epoch(
 
         if clip_max_norm > 0:
             torch.nn.utils.clip_grad_norm_(model.parameters(), clip_max_norm) 
-        optimizer.step()
+        scaler.unscale_(optimizer)
+ 
+        scaler.step(optimizer)
+ 
+        scaler.update()
         
         aux_loss = model.module.aux_loss() if torch.cuda.device_count() > 1 else model.aux_loss()
-        aux_loss.backward()
+        aux_scaler.scale(loss).backward()
         aux_optimizer.step()
         
 
@@ -348,6 +369,14 @@ def parse_args(argv):
     parser.add_argument("--cuda", action="store_true", help="Use cuda")
     parser.add_argument(
         "--save", action="store_true", default=True, help="Save model to disk"
+    )
+    parser.add_argument(
+        "--amp", action="store_true", default=False,
+        help="Use AMP mixed precision (recommended on T4/Colab)"
+    )
+    parser.add_argument(
+        "--save_interval", type=int, default=500,
+        help="Save checkpoint_latest.pth.tar every N iterations (default 500)"
     )
     parser.add_argument(
         "--drop", action="store_true", default=False,
