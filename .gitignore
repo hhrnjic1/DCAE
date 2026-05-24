@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.pth.tar
+datasets/
+runs/
+results/
+reports/
+.venv*/
+tensorboard/
+*.egg-info/
