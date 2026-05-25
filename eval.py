@@ -229,11 +229,11 @@ def main(argv):
     if args.results_json:
         out = {
             "lambda": args.lmbda,
-            "bpp": float(bpp_sum / num_images),
-            "psnr": float(psnr_sum / num_images),
-            "msssim": float(ms_ssim_sum / num_images),
-            "enc_ms": float(enc_time_sum / num_images * 1000),
-            "dec_ms": float(dec_time_sum / num_images * 1000),
+            "bpp": float(Bit_rate),
+            "psnr": float(PSNR),
+            "msssim": float(MS_SSIM),
+            "enc_ms": float(encode_time * 1000),
+            "dec_ms": float(decode_time * 1000),
         }
         Path(args.results_json).parent.mkdir(parents=True, exist_ok=True)
         with open(args.results_json, "w") as _f:
