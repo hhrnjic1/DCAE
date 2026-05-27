@@ -487,16 +487,21 @@ def main(argv):
 
     criterion = RateDistortionLoss(lmbda=args.lmbda, type=type).to(device)
     last_epoch = 0
-    if args.checkpoint:  
+    if args.checkpoint:
         print("Loading", args.checkpoint)
         checkpoint = torch.load(args.checkpoint, map_location=device)
-        net.load_state_dict(checkpoint["state_dict"])
+        state_dict = {k.replace("module.", ""): v for k, v in checkpoint["state_dict"].items()}
+        net.load_state_dict(state_dict)
 
         if args.continue_train:
-            last_epoch = checkpoint["epoch"] + 1
-            optimizer.load_state_dict(checkpoint["optimizer"])
-            aux_optimizer.load_state_dict(checkpoint["aux_optimizer"])
-            lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
+            if "epoch" in checkpoint:
+                last_epoch = checkpoint["epoch"] + 1
+            if "optimizer" in checkpoint:
+                optimizer.load_state_dict(checkpoint["optimizer"])
+            if "aux_optimizer" in checkpoint:
+                aux_optimizer.load_state_dict(checkpoint["aux_optimizer"])
+            if "lr_scheduler" in checkpoint:
+                lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
 
     best_loss = float("inf")
     for epoch in range(last_epoch, args.epochs):
