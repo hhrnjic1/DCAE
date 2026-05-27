@@ -89,8 +89,10 @@ def _update_registered_buffer(
     policy="resize_if_empty",
     dtype=torch.int,
 ):
-    #state_dict_key = state_dict if state_dict_key in state_dict.keys() else "module." + state_dict_key
-
+    if state_dict_key not in state_dict:
+        state_dict_key = "module." + state_dict_key
+    if state_dict_key not in state_dict:
+        return
 
     new_size = state_dict[state_dict_key].size()
     registered_buf = find_named_buffer(module, buffer_name)
