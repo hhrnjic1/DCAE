@@ -29,6 +29,7 @@ incompatibilities. They are documented below in the order they were encountered.
 | 7 | Kodak set absent on a clean Colab clone | Reproducibility | *(latest)* |
 | 8 | Fine-tune ran zero epochs and saved no checkpoint | Training / Checkpoints | *(latest)* |
 | 9 | Stale Colab clone ran outdated `train.py` (#8 fix never reached the runtime) | Reproducibility | *(latest)* |
+| 10 | Sub-256 images crashed fine-tune `RandomCrop` mid-epoch | Data acquisition / Training | *(latest)* |
 
 ---
 
@@ -315,6 +316,51 @@ if len(train_dataset) == 0:
 
 ---
 
+## 10. Sub-256 images crashed the fine-tune `RandomCrop` mid-epoch
+
+**Symptom.** Cell 11 (fine-tune) started, loaded the checkpoint, then died inside the
+dataloader with:
+
+```
+ValueError: Required crop size (256, 256) is larger than input image size (512, 242)
+```
+
+Because the run crashed before any checkpoint was written, Cell 12 then failed with
+`FileNotFoundError: No fine-tuned checkpoint found in Drive — did Cell 11 complete?`.
+The two errors looked unrelated but were the same failure: nothing trained, so nothing
+was saved.
+
+**Root cause.** `scripts/build_imagenet_subset.py` checked `min(W, H) >= min_side` (256)
+**before** resizing, then shrank the long edge to `max_side` (512). Scaling the long edge
+down scales the short edge with it, so an elongated image that passed the pre-resize check
+(e.g. `1083x512`, short edge 512 ≥ 256) ended up at `512x242` — short edge **below** 256.
+That sub-256 image entered the subset, and `train.py`'s `transforms.RandomCrop(256)` (no
+padding) raised `ValueError` the moment the dataloader reached it.
+
+**Resolution.** Two layers of defence:
+
+1. **Build side** — re-check the size *after* resizing and skip anything still below
+   `min_side`, so no sub-256 image reaches the subset:
+
+```python
+img = resize_long_edge(img, args.max_side)
+# resizing the long edge scales the short edge down with it
+if not passes_size(img, args.min_side):
+    continue
+```
+
+2. **Training side** — make the crop tolerant so a stray small image pads instead of
+   killing the whole run (and so an already-built subset trains without a costly rebuild):
+
+```python
+transforms.RandomCrop(args.patch_size, pad_if_needed=True)
+```
+
+`CenterCrop` (test transform) already zero-pads undersized inputs, so only the train
+`RandomCrop` needed the guard.
+
+---
+
 ## Lessons learned
 
 - **Distributed-training artefacts leak into single-GPU use.** The `module.` prefix
@@ -336,3 +382,8 @@ if len(train_dataset) == 0:
   `git pull` / `reset --hard` to the pushed branch, or a reused runtime keeps executing an old
   checkout and a bug "reappears" after it was already fixed (challenge 9). Pair this with loud
   guards (e.g. asserting a non-empty dataset) so silent no-ops surface as errors.
+- **Filter the data the way the model consumes it.** A size check must run on the final image,
+  not the original — resizing the long edge shrinks the short edge with it, so a pre-resize
+  filter let sub-256 images through and crashed the crop (challenge 10). Combine an upstream
+  filter with a tolerant transform (`pad_if_needed=True`) so one bad sample degrades instead of
+  aborting the run.

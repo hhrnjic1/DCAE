@@ -440,8 +440,12 @@ def main(argv):
         
     writer = SummaryWriter(tensorboard_path)
 
+    # pad_if_needed guards against any image whose short edge is below patch_size
+    # (e.g. a stray elongated sample that slipped through the subset builder):
+    # without it RandomCrop raises ValueError and kills the whole run mid-epoch,
+    # before any checkpoint is saved (CHALLENGES.md #10). CenterCrop already pads.
     train_transforms = transforms.Compose(
-        [transforms.RandomCrop(args.patch_size), transforms.ToTensor()]
+        [transforms.RandomCrop(args.patch_size, pad_if_needed=True), transforms.ToTensor()]
     )
     test_transforms = transforms.Compose(
         [transforms.CenterCrop(args.patch_size), transforms.ToTensor()]

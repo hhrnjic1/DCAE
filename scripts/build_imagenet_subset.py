@@ -131,6 +131,13 @@ def build(args):
 
         img = resize_long_edge(img, args.max_side)
 
+        # Resizing the long edge down to max_side scales the short edge with it,
+        # so an elongated image that passed the pre-resize check (e.g. 1083x512)
+        # can drop below min_side afterwards (-> 512x242). Re-check post-resize so
+        # no sub-min_side image reaches train.py's RandomCrop (CHALLENGES.md #10).
+        if not passes_size(img, args.min_side):
+            continue
+
         # reserve early samples for test (one per 30 train)
         use_for_test = (not done_test) and (test_count < target_test) and \
                        (random.random() < target_test / max(target_train, 1))
