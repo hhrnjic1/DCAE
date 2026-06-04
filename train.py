@@ -192,6 +192,9 @@ def train_one_epoch(
 
         # mid-epoch checkpoint (saves to Drive on Colab so disconnect doesn't lose progress)
         if args.save and (i + 1) % args.save_interval == 0:
+            # Save into the lambda subdir (same base as the end-of-epoch save) so the
+            # notebook's resume probe and Cell 12 find checkpoint_latest.pth.tar there.
+            interval_save_path = os.path.join(args.save_path, str(args.lmbda))
             save_checkpoint(
                 {
                     "epoch": epoch,
@@ -203,8 +206,8 @@ def train_one_epoch(
                 },
                 False,
                 epoch,
-                args.save_path,
-                args.save_path + "checkpoint_interval.pth.tar",
+                interval_save_path,
+                os.path.join(interval_save_path, "checkpoint_interval.pth.tar"),
             )
         
 
@@ -310,11 +313,14 @@ def crop(x, padding):
     )
 
 def save_checkpoint(state, is_best, epoch, save_path, filename):
-    torch.save(state, save_path + "checkpoint_latest.pth.tar")
+    # Use os.path.join so the file lands inside save_path (the lambda subdir) with a
+    # proper separator — plain "save_path + name" mangled the path when save_path had
+    # no trailing slash (e.g. ".../finetune/0.0067checkpoint_latest.pth.tar").
+    torch.save(state, os.path.join(save_path, "checkpoint_latest.pth.tar"))
     if epoch % 5 == 0:
         torch.save(state, filename)
     if is_best:
-        torch.save(state, save_path + "checkpoint_best.pth.tar")
+        torch.save(state, os.path.join(save_path, "checkpoint_best.pth.tar"))
 
 
 def parse_args(argv):
@@ -424,15 +430,15 @@ def main(argv):
         print(arg, ":", getattr(args, arg))
     type = args.type
     save_path = os.path.join(args.save_path, str(args.lmbda))
-    if not os.path.exists(save_path):
-        os.makedirs(save_path)
-        os.makedirs(save_path + "tensorboard/")
+    tensorboard_path = os.path.join(save_path, "tensorboard")
+    os.makedirs(save_path, exist_ok=True)
+    os.makedirs(tensorboard_path, exist_ok=True)
 
     if args.seed is not None:
         torch.manual_seed(args.seed)
         random.seed(args.seed)
         
-    writer = SummaryWriter(save_path + "tensorboard/")
+    writer = SummaryWriter(tensorboard_path)
 
     train_transforms = transforms.Compose(
         [transforms.RandomCrop(args.patch_size), transforms.ToTensor()]
@@ -494,8 +500,14 @@ def main(argv):
         net.load_state_dict(state_dict)
 
         if args.continue_train:
-            if "epoch" in checkpoint:
-                last_epoch = checkpoint["epoch"] + 1
+            # NOTE: we deliberately do NOT seed last_epoch from checkpoint["epoch"].
+            # The pretrained checkpoints carry a large epoch counter, which would make
+            # `range(last_epoch, args.epochs)` empty and silently skip all training (and
+            # therefore never save a fine-tuned checkpoint). For this fine-tune workflow
+            # we always run `args.epochs` fresh epochs from the loaded weights; this also
+            # makes disconnect-resume from an interval checkpoint re-run and finish the
+            # epoch instead of skipping it. Optimizer/scheduler state is still restored
+            # when present so a genuine resume continues smoothly.
             if "optimizer" in checkpoint:
                 optimizer.load_state_dict(checkpoint["optimizer"])
             if "aux_optimizer" in checkpoint:
