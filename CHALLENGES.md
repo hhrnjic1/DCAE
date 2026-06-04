@@ -28,6 +28,7 @@ incompatibilities. They are documented below in the order they were encountered.
 | 6 | ImageNet-1k streaming load crashed on current `datasets` | Data acquisition | *(latest)* |
 | 7 | Kodak set absent on a clean Colab clone | Reproducibility | *(latest)* |
 | 8 | Fine-tune ran zero epochs and saved no checkpoint | Training / Checkpoints | *(latest)* |
+| 9 | Stale Colab clone ran outdated `train.py` (#8 fix never reached the runtime) | Reproducibility | *(latest)* |
 
 ---
 
@@ -259,6 +260,61 @@ torch.save(state, os.path.join(save_path, "checkpoint_latest.pth.tar"))
 
 ---
 
+## 9. Stale Colab clone ran outdated `train.py`
+
+**Symptom.** *Identical to Challenge #8, after #8 was already fixed and pushed.* Cell 11
+printed `Fine-tuning complete.` and exited cleanly — with **no `Train epoch …`, no
+`Test epoch …`** lines and no traceback — and Cell 12 again aborted with:
+
+```
+FileNotFoundError: No fine-tuned checkpoint found in Drive — did Cell 11 complete?
+```
+
+**Root cause.** The data and the code fix were both fine; the runtime simply wasn't running
+the fixed code.
+
+1. Cell 5 had built the full subset (**~4000** train images), so the dataloader was not empty.
+2. The #8 fix (decoupling `last_epoch` from the pretrained checkpoint) was committed and
+   **pushed** to the `imagenet-port` branch.
+3. But Cell 3's logic was `if not os.path.exists(REPO_DIR): git clone … else: skip` — with
+   **no `git pull`**. A Colab runtime carried over from an earlier session still had a
+   `/content/DCAE` checkout from *before* the #8 push. Cell 3 saw it, printed
+   `already exists — skipping`, and left it untouched. Cells 4–13 therefore executed the
+   **stale `train.py`**, which still set `last_epoch = checkpoint["epoch"] + 1` → the epoch
+   range was empty → training and saving were skipped, reproducing #8 exactly.
+
+In short: pushing a fix is not the same as running it. The notebook never reconciled an
+existing clone with the pushed branch, so the fix never reached the executing code.
+
+**Resolution.** Made Cell 3 force-sync an existing clone to the latest pushed branch (a fresh
+runtime still clones as before):
+
+```diff
+ if not os.path.exists(REPO_DIR):
+     !git clone -b {GIT_BRANCH} {GITHUB_REPO} {REPO_DIR}
+ else:
+-    print(f"{REPO_DIR} already exists — skipping clone.")
++    print(f"{REPO_DIR} already exists — syncing to latest origin/{GIT_BRANCH}...")
++    !git -C {REPO_DIR} fetch origin {GIT_BRANCH}
++    !git -C {REPO_DIR} checkout {GIT_BRANCH}
++    !git -C {REPO_DIR} reset --hard origin/{GIT_BRANCH}
+```
+
+`reset --hard origin/{GIT_BRANCH}` guarantees the working tree matches the pushed branch even
+if the cached checkout diverged or carried local edits.
+
+As defence-in-depth against this whole class of *silent* "trains nothing" failures, `train.py`
+now also prints the split sizes and raises immediately if the training split is empty, instead
+of letting the epoch loop iterate zero batches:
+
+```python
+print(f"train images: {len(train_dataset)} | test images: {len(test_dataset)}")
+if len(train_dataset) == 0:
+    raise RuntimeError(f"No training images found under {args.dataset}/train — did the dataset build step (Cell 5) run?")
+```
+
+---
+
 ## Lessons learned
 
 - **Distributed-training artefacts leak into single-GPU use.** The `module.` prefix
@@ -276,3 +332,7 @@ torch.save(state, os.path.join(save_path, "checkpoint_latest.pth.tar"))
   the fine-tune loop bound, or the run silently trains nothing (challenge 8). Build save
   paths with `os.path.join`, never string concatenation — a missing separator hides the
   output where the next stage can't find it.
+- **Pushing a fix is not running it.** A notebook that conditionally skips cloning must still
+  `git pull` / `reset --hard` to the pushed branch, or a reused runtime keeps executing an old
+  checkout and a bug "reappears" after it was already fixed (challenge 9). Pair this with loud
+  guards (e.g. asserting a non-empty dataset) so silent no-ops surface as errors.

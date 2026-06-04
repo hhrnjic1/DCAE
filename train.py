@@ -450,6 +450,15 @@ def main(argv):
     train_dataset = ImageFolder(args.dataset, split="train", transform=train_transforms)
     test_dataset = ImageFolder(args.dataset, split="test", transform=test_transforms)
 
+    # Fail loudly on an empty split. compressai's ImageFolder silently yields a
+    # zero-length dataset for an empty/missing dir, which makes the epoch loop iterate
+    # zero batches — training "completes" without ever running or saving (see CHALLENGES.md).
+    print(f"train images: {len(train_dataset)} | test images: {len(test_dataset)}")
+    if len(train_dataset) == 0:
+        raise RuntimeError(
+            f"No training images found under {args.dataset}/train — did the dataset build step (Cell 5) run?"
+        )
+
     if args.local_rank != -1:
         torch.cuda.set_device(args.local_rank)
         device = torch.device("cuda", args.local_rank)
