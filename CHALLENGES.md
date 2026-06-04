@@ -30,6 +30,7 @@ incompatibilities. They are documented below in the order they were encountered.
 | 8 | Fine-tune ran zero epochs and saved no checkpoint | Training / Checkpoints | *(latest)* |
 | 9 | Stale Colab clone ran outdated `train.py` (#8 fix never reached the runtime) | Reproducibility | *(latest)* |
 | 10 | Sub-256 images crashed fine-tune `RandomCrop` mid-epoch | Data acquisition / Training | *(latest)* |
+| 11 | AMP fine-tune diverged to NaN and poisoned the checkpoint | Training / Checkpoints | *(latest)* |
 
 ---
 
@@ -361,6 +362,81 @@ transforms.RandomCrop(args.patch_size, pad_if_needed=True)
 
 ---
 
+## 11. AMP fine-tune diverged to NaN and poisoned the checkpoint
+
+**Symptom.** Cell 11 (fine-tune, run with `--amp`) trained to completion but every logged step
+reported `nan` from the very first interval:
+
+```
+Train epoch 0: [800/4000]    Loss: nan |    MSE loss: nan |    Bpp loss: nan |    Aux loss: nan
+```
+
+Cell 12 (re-evaluate) then crashed inside `net.update()` while building the entropy-coding
+tables:
+
+```
+ValueError: Invalid `pmf`, non-finite or negative element found: nan
+```
+
+so both fine-tuned rows of the comparison table came out `N/A`. The pretrained evaluations were
+unaffected — only the fine-tuned checkpoint was bad.
+
+**Root causes.** Mixed precision (`--amp`, fp16), with two compounding defects:
+
+1. **The rate term underflows in fp16.** `RateDistortionLoss` computes
+   `torch.log(likelihoods)` (`train.py`) on entropy-model outputs produced under `autocast`
+   in fp16 (`train_one_epoch`). Small likelihoods underflow to `0` in half precision, so
+   `log(0) = -inf` and the loss becomes `nan`.
+2. **The auxiliary step is unguarded and bakes the NaN into the checkpoint.** The aux optimizer
+   runs *outside* the `GradScaler` inf/nan-skip path:
+
+   ```python
+   aux_loss = model.aux_loss()
+   aux_loss.backward()
+   aux_optimizer.step()
+   ```
+
+   The `GradScaler` would skip a `nan`/`inf` **main** step, but nothing guards the aux step, so
+   the first `nan` aux gradient is written straight into the entropy-bottleneck quantiles —
+   permanently corrupting the saved parameters. That `nan` is exactly what `net.update()`
+   rejects at eval time.
+
+This **supersedes the optimism of Challenge #2**: keeping the auxiliary loss "in fp32" was not
+sufficient, because the forward pass (and therefore the likelihoods feeding `log`) still ran in
+fp16, and the unguarded aux step propagated the resulting `nan` into the saved entropy model.
+
+**Resolution.** Fine-tune in **fp32** — drop `--amp` from the fine-tune cell (`train.py`'s
+`--amp` defaults to `False`, so omitting it is enough), and **halve the batch size (8 → 4)** so
+the now-fp32 activations still fit the T4's 16 GB. Because the previous run had already written
+a `nan` checkpoint to Drive, the poisoned `finetune/<lambda>/` directory must be **deleted
+before re-running** — otherwise the cell's resume probe reloads the `nan` weights and reproduces
+the failure.
+
+```diff
+ !python train.py \
+     -d {imagenet_train} \
+     --cuda \
+-    --amp \
+     -e {FT_EPOCHS} \
+     --lambda {FT_LAMBDA} \
+-    --batch-size 8 \
+-    --num-workers 4 \
++    --batch-size 4 \
++    --num-workers 2 \
+     ...
+```
+
+```python
+# delete the NaN-poisoned checkpoint before the fp32 re-run
+import shutil, os
+shutil.rmtree(f"{DRIVE_DIR}/finetune/{FT_LAMBDA}", ignore_errors=True)
+```
+
+After the fix the training loss is finite from the first step and Cell 12's eval completes,
+filling in the fine-tuned bpp/PSNR/MS-SSIM rows.
+
+---
+
 ## Lessons learned
 
 - **Distributed-training artefacts leak into single-GPU use.** The `module.` prefix
@@ -368,6 +444,13 @@ transforms.RandomCrop(args.patch_size, pad_if_needed=True)
   prefix-stripping and tolerant buffer loading should be the default, not an afterthought.
 - **Mixed precision is not uniform across a model.** The rate-distortion auxiliary loss
   must stay in fp32 while the main reconstruction loss runs in fp16 (challenge 2).
+- **AMP is unsafe for the rate term, full stop.** Even with the aux loss nominally in fp32,
+  running the forward pass in fp16 makes the entropy likelihoods underflow to `0`, so
+  `log(likelihoods)` goes non-finite and the unguarded aux step bakes that `nan` straight into
+  the saved entropy model — which then fails `update()` at eval (challenge 11). For short
+  fine-tunes, prefer plain fp32 (drop `--amp`, shrink the batch to fit); if AMP is truly
+  needed, compute the rate/aux loss in fp32 *and* guard the aux step against non-finite values.
+  And a `nan` checkpoint is sticky: delete it before re-running, or the resume path reloads it.
 - **Pin to library behaviour, not just versions.** The Hugging Face `trust_remote_code`
   removal (challenge 6) broke working code with no version change on our side; preferring
   the Parquet export future-proofs the data pipeline.
