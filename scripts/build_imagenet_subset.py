@@ -59,13 +59,17 @@ def save_flat(img: Image.Image, out_dir: Path, counter: int) -> Path:
 # sources
 # ──────────────────────────────────────────────────────────────
 
-def iter_hf(split: str = "train"):
+def iter_hf(split: str = "train", seed: int = 42):
     """Stream images from HuggingFace imagenet-1k (requires HF login + license accept)."""
     try:
         from datasets import load_dataset
     except ImportError:
         raise SystemExit("Install with: pip install datasets")
-    ds = load_dataset("imagenet-1k", split=split, streaming=True, trust_remote_code=True)
+    # Namespaced repo id + parquet export: no loading script, no trust_remote_code.
+    ds = load_dataset("ILSVRC/imagenet-1k", split=split, streaming=True)
+    # The train split streams in class order; shuffle so the per-class cap is met
+    # after reading ~15-20k images instead of nearly the whole 1.28M-image set.
+    ds = ds.shuffle(seed=seed, buffer_size=20000)
     for sample in ds:
         pil = sample["image"]
         label = sample["label"]
@@ -110,7 +114,7 @@ def build(args):
           f"min_side={args.min_side}, max_side={args.max_side}")
 
     if args.source == "hf":
-        stream = iter_hf("train")
+        stream = iter_hf("train", seed=args.seed)
     else:
         if not args.root:
             raise SystemExit("--root is required for --source local")
